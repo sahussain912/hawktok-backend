@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "description": "HawkTok contact form backend",
   "dependencies": {
-    "nodemailer": "^6.9.9"
+    "resend": "^3.2.0"
   }
 }
