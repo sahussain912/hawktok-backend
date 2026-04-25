@@ -1,6 +1,6 @@
-const { Resend } = require("resend");
+const nodemailer = require("nodemailer");
 
-// Utility: simple HTML escape
+// Utility: simple HTML escape to prevent injection into email bodies
 function escapeHtml(str) {
   if (!str) return '';
   return String(str)
@@ -11,19 +11,22 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-// In-memory rate limiting
+// In-memory rate limiting (resets per cold start, good enough for serverless)
 const ipRequestMap = new Map();
 const RATE_LIMIT = 12;
-const WINDOW_MS = 60 * 60 * 1000;
+const WINDOW_MS = 60 * 60 * 1000; // 1 hour
 
 function isRateLimited(ip) {
   const now = Date.now();
   const entry = ipRequestMap.get(ip);
+
   if (!entry || now - entry.startTime > WINDOW_MS) {
     ipRequestMap.set(ip, { count: 1, startTime: now });
     return false;
   }
+
   if (entry.count >= RATE_LIMIT) return true;
+
   entry.count++;
   return false;
 }
@@ -32,6 +35,7 @@ module.exports = async (req, res) => {
   // CORS headers
   const allowedOrigins = ["https://hawktok.com", "https://www.hawktok.com"];
   const origin = req.headers.origin;
+
   if (allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
@@ -39,13 +43,18 @@ module.exports = async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Access-Control-Allow-Credentials", "true");
 
-  if (req.method === "OPTIONS") return res.status(200).end();
+  // Handle preflight
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  // Only allow POST
   if (req.method !== "POST") {
     return res.status(405).json({ success: false, msg: "Method not allowed." });
   }
 
   // Rate limiting
-  const clientIp = req.headers["x-forwarded-for"] || "unknown";
+  const clientIp = req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown";
   if (isRateLimited(clientIp)) {
     return res.status(429).json({ success: false, msg: "Too many submissions. Please try again later." });
   }
@@ -71,15 +80,13 @@ module.exports = async (req, res) => {
   const safeEmail = escapeHtml(String(email).trim());
   const safeMessage = escapeHtml(message.trim()).replace(/\n/g, "<br>");
 
-  try {
-    const resend = new Resend(process.env.RESEND_API_KEY);
-
-    const { error } = await resend.emails.send({
-      from: "HawkTok Contact <onboarding@resend.dev>",
-      replyTo: safeEmail,
-      to: process.env.EMAIL_TO,
-      subject: `[WEBSITE FORM] New Contact Request from ${safeName}`,
-      html: `
+  const mailOptions = {
+    from: `"${safeName}" <${process.env.EMAIL_USER}>`,
+    replyTo: safeEmail,
+    to: process.env.EMAIL_USER,
+    subject: `[WEBSITE FORM] New Contact Request from ${safeName}`,
+    text: `Website contact form submission\nFrom: ${safeName} <${safeEmail}>\n\n${message}`,
+    html: `
 <!DOCTYPE html>
 <html>
 <head>
@@ -101,16 +108,26 @@ module.exports = async (req, res) => {
   </div>
 </body>
 </html>`,
+  };
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: "smtp.hostinger.com",
+      port: 465,
+      secure: true,
+      auth: {
+        user: process.env.EMAIL_USER,
+        pass: process.env.EMAIL_PASS,
+      },
+      logger: false,
+      debug: false,
     });
 
-    if (error) {
-      console.error("Resend error:", error);
-      return res.status(500).json({ success: false, msg: "Failed to send message." });
-    }
-
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`Email sent: ${info.messageId}`);
     return res.status(200).json({ success: true, msg: "Message sent successfully!" });
-  } catch (err) {
-    console.error("Error:", err?.message || err);
+  } catch (error) {
+    console.error("Error sending email:", error?.message || error);
     return res.status(500).json({ success: false, msg: "Failed to send message." });
   }
 };
